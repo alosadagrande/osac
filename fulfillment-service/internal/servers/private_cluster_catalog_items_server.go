@@ -131,7 +131,7 @@ func (s *PrivateClusterCatalogItemsServer) Create(ctx context.Context,
 		if err = validateFieldDefinitions(object.GetFieldDefinitions()); err != nil {
 			return
 		}
-		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object); err != nil {
+		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object.GetFieldDefinitions(), object.GetTemplate()); err != nil {
 			return
 		}
 	}
@@ -145,7 +145,14 @@ func (s *PrivateClusterCatalogItemsServer) Update(ctx context.Context,
 		if err = validateFieldDefinitions(object.GetFieldDefinitions()); err != nil {
 			return
 		}
-		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object); err != nil {
+		templateRef := object.GetTemplate()
+		if templateRef == "" && hasTemplateParamPaths(object.GetFieldDefinitions()) {
+			templateRef, err = s.existingCatalogItemTemplate(ctx, object.GetId())
+			if err != nil {
+				return
+			}
+		}
+		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object.GetFieldDefinitions(), templateRef); err != nil {
 			return
 		}
 	}
@@ -166,12 +173,22 @@ func (s *PrivateClusterCatalogItemsServer) Signal(ctx context.Context,
 }
 
 func (s *PrivateClusterCatalogItemsServer) validateFieldDefinitionPathsAndTemplateParams(
-	ctx context.Context, object *privatev1.ClusterCatalogItem,
+	ctx context.Context, fieldDefs []*privatev1.FieldDefinition, templateRef string,
 ) error {
-	return validateCatalogItemFieldDefinitionPaths(ctx, object,
+	return validateCatalogItemFieldDefinitionPaths(ctx, fieldDefs, templateRef,
 		(&privatev1.ClusterSpec{}).ProtoReflect().Descriptor(),
 		s.resolveTemplate,
 	)
+}
+
+func (s *PrivateClusterCatalogItemsServer) existingCatalogItemTemplate(ctx context.Context, id string) (string, error) {
+	req := &privatev1.ClusterCatalogItemsGetRequest{}
+	req.SetId(id)
+	var resp *privatev1.ClusterCatalogItemsGetResponse
+	if err := s.generic.Get(ctx, req, &resp); err != nil {
+		return "", err
+	}
+	return resp.GetObject().GetTemplate(), nil
 }
 
 func (s *PrivateClusterCatalogItemsServer) resolveTemplate(ctx context.Context, id string) (utils.Template, error) {

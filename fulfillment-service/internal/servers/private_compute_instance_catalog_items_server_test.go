@@ -883,6 +883,40 @@ var _ = Describe("Private compute instance catalog items server", func() {
 			Expect(status.Message()).To(ContainSubstring("unknown_param"))
 		})
 
+		It("Validates template_parameters on Update without template in request", func() {
+			createComputeInstanceTemplate("tpl-ci-partial-update", "valid_param")
+
+			response, err := server.Create(ctx, privatev1.ComputeInstanceCatalogItemsCreateRequest_builder{
+				Object: privatev1.ComputeInstanceCatalogItem_builder{
+					Title:    "Partial update test",
+					Template: "tpl-ci-partial-update",
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			id := response.GetObject().GetId()
+			DeferCleanup(func() {
+				_, _ = server.Delete(ctx, privatev1.ComputeInstanceCatalogItemsDeleteRequest_builder{
+					Id: id,
+				}.Build())
+			})
+
+			_, err = server.Update(ctx, privatev1.ComputeInstanceCatalogItemsUpdateRequest_builder{
+				Object: privatev1.ComputeInstanceCatalogItem_builder{
+					Id: id,
+					FieldDefinitions: []*privatev1.FieldDefinition{
+						privatev1.FieldDefinition_builder{
+							Path:     "template_parameters.valid_param",
+							Editable: true,
+						}.Build(),
+					},
+				}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{
+					Paths: []string{"field_definitions"},
+				},
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+		})
+
 		It("Allows empty name without conflict", func() {
 			_, err := server.Create(ctx, privatev1.ComputeInstanceCatalogItemsCreateRequest_builder{
 				Object: privatev1.ComputeInstanceCatalogItem_builder{

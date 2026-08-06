@@ -143,7 +143,7 @@ func (s *PrivateComputeInstanceCatalogItemsServer) Create(ctx context.Context,
 		if err = validateFieldDefinitions(object.GetFieldDefinitions()); err != nil {
 			return
 		}
-		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object); err != nil {
+		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object.GetFieldDefinitions(), object.GetTemplate()); err != nil {
 			return
 		}
 		warnings, err = s.validateFieldDefinitionsInstanceType(ctx, object.GetFieldDefinitions())
@@ -168,7 +168,14 @@ func (s *PrivateComputeInstanceCatalogItemsServer) Update(ctx context.Context,
 		if err = validateFieldDefinitions(object.GetFieldDefinitions()); err != nil {
 			return
 		}
-		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object); err != nil {
+		templateRef := object.GetTemplate()
+		if templateRef == "" && hasTemplateParamPaths(object.GetFieldDefinitions()) {
+			templateRef, err = s.existingCatalogItemTemplate(ctx, object.GetId())
+			if err != nil {
+				return
+			}
+		}
+		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object.GetFieldDefinitions(), templateRef); err != nil {
 			return
 		}
 		warnings, err = s.validateFieldDefinitionsInstanceType(ctx, object.GetFieldDefinitions())
@@ -199,12 +206,22 @@ func (s *PrivateComputeInstanceCatalogItemsServer) Signal(ctx context.Context,
 }
 
 func (s *PrivateComputeInstanceCatalogItemsServer) validateFieldDefinitionPathsAndTemplateParams(
-	ctx context.Context, object *privatev1.ComputeInstanceCatalogItem,
+	ctx context.Context, fieldDefs []*privatev1.FieldDefinition, templateRef string,
 ) error {
-	return validateCatalogItemFieldDefinitionPaths(ctx, object,
+	return validateCatalogItemFieldDefinitionPaths(ctx, fieldDefs, templateRef,
 		(&privatev1.ComputeInstanceSpec{}).ProtoReflect().Descriptor(),
 		s.resolveTemplate,
 	)
+}
+
+func (s *PrivateComputeInstanceCatalogItemsServer) existingCatalogItemTemplate(ctx context.Context, id string) (string, error) {
+	req := &privatev1.ComputeInstanceCatalogItemsGetRequest{}
+	req.SetId(id)
+	var resp *privatev1.ComputeInstanceCatalogItemsGetResponse
+	if err := s.generic.Get(ctx, req, &resp); err != nil {
+		return "", err
+	}
+	return resp.GetObject().GetTemplate(), nil
 }
 
 func (s *PrivateComputeInstanceCatalogItemsServer) resolveTemplate(ctx context.Context, id string) (utils.Template, error) {

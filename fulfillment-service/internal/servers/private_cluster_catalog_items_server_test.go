@@ -884,6 +884,40 @@ var _ = Describe("Private cluster catalog items server", func() {
 			Expect(status.Message()).To(ContainSubstring("unknown_param"))
 		})
 
+		It("Validates template_parameters on Update without template in request", func() {
+			createClusterTemplate("tpl-cluster-partial-update", "valid_param")
+
+			response, err := server.Create(ctx, privatev1.ClusterCatalogItemsCreateRequest_builder{
+				Object: privatev1.ClusterCatalogItem_builder{
+					Title:    "Partial update test",
+					Template: "tpl-cluster-partial-update",
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			id := response.GetObject().GetId()
+			DeferCleanup(func() {
+				_, _ = server.Delete(ctx, privatev1.ClusterCatalogItemsDeleteRequest_builder{
+					Id: id,
+				}.Build())
+			})
+
+			_, err = server.Update(ctx, privatev1.ClusterCatalogItemsUpdateRequest_builder{
+				Object: privatev1.ClusterCatalogItem_builder{
+					Id: id,
+					FieldDefinitions: []*privatev1.FieldDefinition{
+						privatev1.FieldDefinition_builder{
+							Path:     "template_parameters.valid_param",
+							Editable: true,
+						}.Build(),
+					},
+				}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{
+					Paths: []string{"field_definitions"},
+				},
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+		})
+
 		It("Allows empty name without conflict", func() {
 			_, err := server.Create(ctx, privatev1.ClusterCatalogItemsCreateRequest_builder{
 				Object: privatev1.ClusterCatalogItem_builder{

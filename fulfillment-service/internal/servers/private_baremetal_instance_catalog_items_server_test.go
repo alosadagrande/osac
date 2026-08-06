@@ -579,5 +579,39 @@ var _ = Describe("Private bare metal instance catalog items server", func() {
 			Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 			Expect(status.Message()).To(ContainSubstring("unknown_param"))
 		})
+
+		It("Validates template_parameters on Update without template in request", func() {
+			createBareMetalInstanceTemplate("tpl_bm_partial_update", "valid_param")
+
+			response, err := server.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{
+				Object: privatev1.BareMetalInstanceCatalogItem_builder{
+					Title:    "Partial update test",
+					Template: "tpl_bm_partial_update",
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			id := response.GetObject().GetId()
+			DeferCleanup(func() {
+				_, _ = server.Delete(ctx, privatev1.BareMetalInstanceCatalogItemsDeleteRequest_builder{
+					Id: id,
+				}.Build())
+			})
+
+			_, err = server.Update(ctx, privatev1.BareMetalInstanceCatalogItemsUpdateRequest_builder{
+				Object: privatev1.BareMetalInstanceCatalogItem_builder{
+					Id: id,
+					FieldDefinitions: []*privatev1.FieldDefinition{
+						privatev1.FieldDefinition_builder{
+							Path:     "template_parameters.valid_param",
+							Editable: true,
+						}.Build(),
+					},
+				}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{
+					Paths: []string{"field_definitions"},
+				},
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+		})
 	})
 })

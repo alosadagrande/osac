@@ -38,6 +38,9 @@ import (
 	"github.com/osac-project/fulfillment-service/internal/utils"
 )
 
+const templateParametersField = "template_parameters"
+const templateParametersPrefix = templateParametersField + "."
+
 // catalogItem is implemented by both ClusterCatalogItem and ComputeInstanceCatalogItem.
 type catalogItem interface {
 	proto.Message
@@ -70,28 +73,33 @@ func validateFieldDefinitions(fieldDefinitions []*privatev1.FieldDefinition) err
 // validateFieldDefinitionPaths checks that each field definition path corresponds to a valid field
 // in the given spec message descriptor. Paths starting with "template_parameters" are skipped
 // (validated separately by validateFieldDefinitionTemplateParams).
+// All invalid paths are collected and reported together.
 func validateFieldDefinitionPaths(
 	fieldDefinitions []*privatev1.FieldDefinition,
 	specDescriptor protoreflect.MessageDescriptor,
 ) error {
+	var invalidPaths []string
 	for _, fd := range fieldDefinitions {
 		path := fd.GetPath()
 		if path == "" {
 			continue
 		}
 		segments := strings.Split(path, ".")
-		if segments[0] == "template_parameters" {
+		if segments[0] == templateParametersField {
 			if len(segments) == 1 {
-				return grpcstatus.Errorf(grpccodes.InvalidArgument,
-					"invalid field_definition path 'template_parameters': "+
-						"must specify a parameter name (e.g., 'template_parameters.param_name')")
+				invalidPaths = append(invalidPaths,
+					fmt.Sprintf("'%s': must specify a parameter name "+
+						"(e.g., 'template_parameters.param_name')", path))
 			}
 			continue
 		}
 		if err := validatePathAgainstDescriptor(segments, specDescriptor); err != nil {
-			return grpcstatus.Errorf(grpccodes.InvalidArgument,
-				"invalid field_definition path '%s': %v", path, err)
+			invalidPaths = append(invalidPaths, fmt.Sprintf("'%s': %v", path, err))
 		}
+	}
+	if len(invalidPaths) > 0 {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"invalid field_definition path(s): %s", strings.Join(invalidPaths, "; "))
 	}
 	return nil
 }
@@ -149,7 +157,7 @@ func validateFieldDefinitionTemplateParams(
 	var paramPaths []string
 	for _, fd := range fieldDefinitions {
 		path := fd.GetPath()
-		if strings.HasPrefix(path, "template_parameters.") {
+		if strings.HasPrefix(path, templateParametersPrefix) {
 			paramPaths = append(paramPaths, path)
 		}
 	}
@@ -164,7 +172,7 @@ func validateFieldDefinitionTemplateParams(
 
 	var invalid []string
 	for _, path := range paramPaths {
-		paramName := strings.TrimPrefix(path, "template_parameters.")
+		paramName := strings.TrimPrefix(path, templateParametersPrefix)
 		if !validNames[paramName] {
 			invalid = append(invalid, paramName)
 		}
@@ -192,13 +200,15 @@ type templateResolver func(ctx context.Context, id string) (utils.Template, erro
 
 // validateCatalogItemFieldDefinitionPaths validates that field definition paths match the spec
 // proto schema and that template_parameters paths reference valid template parameters.
+// The templateRef is passed explicitly so that Update callers can resolve it from the
+// existing object when the request does not include it (partial update via field mask).
 func validateCatalogItemFieldDefinitionPaths(
 	ctx context.Context,
-	item catalogItem,
+	fieldDefs []*privatev1.FieldDefinition,
+	templateRef string,
 	specDescriptor protoreflect.MessageDescriptor,
 	resolve templateResolver,
 ) error {
-	fieldDefs := item.GetFieldDefinitions()
 	if len(fieldDefs) == 0 {
 		return nil
 	}
@@ -207,7 +217,16 @@ func validateCatalogItemFieldDefinitionPaths(
 		return err
 	}
 
-	return validateTemplateParams(ctx, item.GetTemplate(), fieldDefs, resolve)
+	return validateTemplateParams(ctx, templateRef, fieldDefs, resolve)
+}
+
+func hasTemplateParamPaths(fieldDefs []*privatev1.FieldDefinition) bool {
+	for _, fd := range fieldDefs {
+		if strings.HasPrefix(fd.GetPath(), templateParametersPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateTemplateParams(
@@ -215,14 +234,7 @@ func validateTemplateParams(
 	fieldDefs []*privatev1.FieldDefinition,
 	resolve templateResolver,
 ) error {
-	hasTemplateParamPaths := false
-	for _, fd := range fieldDefs {
-		if strings.HasPrefix(fd.GetPath(), "template_parameters.") {
-			hasTemplateParamPaths = true
-			break
-		}
-	}
-	if !hasTemplateParamPaths {
+	if !hasTemplateParamPaths(fieldDefs) {
 		return nil
 	}
 
@@ -374,7 +386,7 @@ func applyDefault(specMap map[string]any, path string, defaultVal *structpb.Valu
 		return grpcstatus.Errorf(grpccodes.Internal,
 			"failed to parse default for field '%s': %v", path, err)
 	}
-	if strings.HasPrefix(path, "template_parameters.") {
+	if strings.HasPrefix(path, templateParametersPrefix) {
 		parsed = wrapValueAsAny(parsed)
 	}
 	maputil.SetNestedValue(specMap, path, parsed)
@@ -468,7 +480,7 @@ func collectLeafPaths(m map[string]any, prefix string) []string {
 		if nested, ok := val.(map[string]any); ok {
 			// Treat template_parameters entries as opaque leaves —
 			// their inner @type/value keys are protobuf Any encoding details.
-			if prefix == "template_parameters" {
+			if prefix == templateParametersField {
 				paths = append(paths, fullPath)
 			} else {
 				paths = append(paths, collectLeafPaths(nested, fullPath)...)

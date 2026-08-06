@@ -159,7 +159,7 @@ func (s *PrivateBareMetalInstanceCatalogItemsServer) Create(ctx context.Context,
 		if err = validateFieldDefinitions(object.GetFieldDefinitions()); err != nil {
 			return
 		}
-		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object); err != nil {
+		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object.GetFieldDefinitions(), object.GetTemplate()); err != nil {
 			return
 		}
 	}
@@ -173,7 +173,14 @@ func (s *PrivateBareMetalInstanceCatalogItemsServer) Update(ctx context.Context,
 		if err = validateFieldDefinitions(object.GetFieldDefinitions()); err != nil {
 			return
 		}
-		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object); err != nil {
+		templateRef := object.GetTemplate()
+		if templateRef == "" && hasTemplateParamPaths(object.GetFieldDefinitions()) {
+			templateRef, err = s.existingCatalogItemTemplate(ctx, object.GetId())
+			if err != nil {
+				return
+			}
+		}
+		if err = s.validateFieldDefinitionPathsAndTemplateParams(ctx, object.GetFieldDefinitions(), templateRef); err != nil {
 			return
 		}
 	}
@@ -206,12 +213,22 @@ func (s *PrivateBareMetalInstanceCatalogItemsServer) Signal(ctx context.Context,
 }
 
 func (s *PrivateBareMetalInstanceCatalogItemsServer) validateFieldDefinitionPathsAndTemplateParams(
-	ctx context.Context, object *privatev1.BareMetalInstanceCatalogItem,
+	ctx context.Context, fieldDefs []*privatev1.FieldDefinition, templateRef string,
 ) error {
-	return validateCatalogItemFieldDefinitionPaths(ctx, object,
+	return validateCatalogItemFieldDefinitionPaths(ctx, fieldDefs, templateRef,
 		(&privatev1.BareMetalInstanceSpec{}).ProtoReflect().Descriptor(),
 		s.resolveTemplate,
 	)
+}
+
+func (s *PrivateBareMetalInstanceCatalogItemsServer) existingCatalogItemTemplate(ctx context.Context, id string) (string, error) {
+	req := &privatev1.BareMetalInstanceCatalogItemsGetRequest{}
+	req.SetId(id)
+	var resp *privatev1.BareMetalInstanceCatalogItemsGetResponse
+	if err := s.generic.Get(ctx, req, &resp); err != nil {
+		return "", err
+	}
+	return resp.GetObject().GetTemplate(), nil
 }
 
 func (s *PrivateBareMetalInstanceCatalogItemsServer) resolveTemplate(ctx context.Context, id string) (utils.Template, error) {
