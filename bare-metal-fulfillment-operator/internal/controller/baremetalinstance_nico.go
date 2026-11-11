@@ -30,24 +30,27 @@ const (
 // example a canceled one, is uncertain and keeps the conservative behavior.
 func recordNicoCreateFailure(bmi *v1alpha1.BareMetalInstance, artifacts map[string]any) error {
 	outcome, _ := artifacts["nicoCreateOutcome"].(string)
-	switch outcome {
-	case nicoCreateOutcomeNotCreated, nicoCreateOutcomeUncertain:
+	instanceID, _ := artifacts["nicoInstanceID"].(string)
+	machineID, _ := artifacts["nicoMachineID"].(string)
+	if outcome == nicoCreateOutcomeNotCreated && instanceID == "" && machineID == "" {
 		bmi.Status.NicoCreateOutcome = outcome
-	case nicoCreateOutcomeCreated:
-		instanceID, _ := artifacts["nicoInstanceID"].(string)
-		machineID, _ := artifacts["nicoMachineID"].(string)
-		if instanceID != "" && bmi.Status.NicoInstanceID != "" && bmi.Status.NicoInstanceID != instanceID ||
-			machineID != "" && bmi.Status.NicoMachineID != "" && bmi.Status.NicoMachineID != machineID {
-			return fmt.Errorf("NICo AAP artifacts differ from saved provider IDs")
-		}
+		return nil
+	}
+	// Any reported ID identifies a NICo resource to release, whatever the
+	// reported outcome; never discard it.
+	if instanceID != "" && bmi.Status.NicoInstanceID != "" && bmi.Status.NicoInstanceID != instanceID ||
+		machineID != "" && bmi.Status.NicoMachineID != "" && bmi.Status.NicoMachineID != machineID {
+		return fmt.Errorf("NICo AAP artifacts differ from saved provider IDs")
+	}
+	if instanceID != "" {
+		bmi.Status.NicoInstanceID = instanceID
+	}
+	if machineID != "" {
+		bmi.Status.NicoMachineID = machineID
+	}
+	if outcome == nicoCreateOutcomeCreated {
 		bmi.Status.NicoCreateOutcome = outcome
-		if instanceID != "" {
-			bmi.Status.NicoInstanceID = instanceID
-		}
-		if machineID != "" {
-			bmi.Status.NicoMachineID = machineID
-		}
-	default:
+	} else {
 		bmi.Status.NicoCreateOutcome = nicoCreateOutcomeUncertain
 	}
 	return nil

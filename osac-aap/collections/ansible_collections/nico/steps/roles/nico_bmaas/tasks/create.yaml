@@ -98,12 +98,16 @@
     - name: Publish the NICo create outcome and failure reason for the BMI controller
       ansible.builtin.set_stats:
         data:
-          # The module reports its outcome. A failure before the module ran
-          # made no NICo call; an unexpected module failure is uncertain.
+          # A failed module reports its outcome. A module that succeeded
+          # created the Instance even if a later task failed. A failure before
+          # the module ran made no NICo call; an unexpected module failure is
+          # uncertain.
           nicoCreateOutcome: >-
             {{ nico_bmaas_result.nico_create_outcome
                if nico_bmaas_result.nico_create_outcome is defined
-               else ('Uncertain' if nico_bmaas_result is defined else 'NotCreated') }}
+               else ('NotCreated' if nico_bmaas_result is not defined
+                     else ('Uncertain' if nico_bmaas_result.failed | default(false)
+                           else 'Created')) }}
           nicoInstanceID: "{{ nico_bmaas_result.instance_id | default('') }}"
           nicoMachineID: "{{ nico_bmaas_result.machine_id | default('') }}"
           nicoFailureReason: >-

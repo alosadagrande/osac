@@ -389,6 +389,25 @@ var _ = Describe("NICo BareMetalInstance lifecycle", func() {
 			Expect(k8sClient.Get(ctx, req.NamespacedName, &v1alpha1.BareMetalInstance{})).ToNot(Succeed())
 		})
 
+		It("keeps reported IDs from an uncertain outcome and releases them through NICo", func() {
+			provider.outputs = map[string]any{
+				"nicoCreateOutcome": "Uncertain",
+				"nicoInstanceID":    "nico-instance-1",
+				"nicoMachineID":     "nico-machine-1",
+			}
+			fresh := createAndFail()
+			Expect(fresh.Status.NicoCreateOutcome).To(Equal("Uncertain"))
+			Expect(fresh.Status.NicoInstanceID).To(Equal("nico-instance-1"))
+			Expect(fresh.Status.NicoMachineID).To(Equal("nico-machine-1"))
+
+			Expect(k8sClient.Delete(ctx, fresh)).To(Succeed())
+			reconcile() // launch deprovision with the reported IDs
+			Expect(deprovisionLaunches).To(Equal(1))
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &v1alpha1.BareMetalInstance{})).ToNot(Succeed())
+		})
+
 		It("keeps the finalizer when the job reports no outcome", func() {
 			provider.provisionState = opv1alpha1.JobStateCanceled
 			provider.outputs = map[string]any{}
