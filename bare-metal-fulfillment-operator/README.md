@@ -191,9 +191,11 @@ intent, the operator reads the BMI DiskImage ID from the
 `osac.openshift.io/disk-image-id` annotation, which the fulfillment service
 sets, and passes the mapped Operating System to the AAP create job. A DiskImage
 without an entry fails with `ProvisionTemplateComplete=False`, reason
-`UnsupportedDiskImage`, and never reaches NICo. Creation requires `version: 2`;
-a `version: 1` file has no catalog and fails creation as a configuration
-error. Deletion only needs the tenant binding, so it accepts both versions.
+`UnsupportedDiskImage`, and never reaches NICo. That rejection is terminal:
+after the DiskImage is added to the catalog, the tenant recreates the BMI.
+Creation requires `version: 2`; a `version: 1` file has no catalog and fails
+creation as a configuration error, which is retried once the ConfigMap is
+fixed. Deletion only needs the tenant binding, so it accepts both versions.
 The NICo Operating System is never taken from the AWX credential.
 
 The catalog Operating System must be a `Ready` templated iPXE definition
@@ -209,7 +211,9 @@ A failed create job reports `nicoCreateOutcome`, which the operator saves in
 `status.nicoCreateOutcome`. `NotCreated` (the job failed before the NICo create
 request) lets delete remove the finalizer without NICo cleanup. `Created`
 saves the Instance and Machine IDs, so delete releases the Instance through
-NICo. `Uncertain` keeps the finalizer until the Site is verified.
+NICo; an Instance that never got a Machine is released once it is gone.
+`Uncertain` keeps the finalizer until the Site is verified, unless the job
+also reported IDs, which are always saved and released.
 
 `osacTenantID` is the exact BMI `osac.openshift.io/tenant` annotation value
 (currently the OSAC tenant name). `osacSubnetID` is the public OSAC Subnet ID
