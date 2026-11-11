@@ -284,6 +284,21 @@ var _ = Describe("NICo BareMetalInstance lifecycle", func() {
 		Entry("no DiskImage ID annotation", ""),
 	)
 
+	It("keeps an unsupported DiskImage terminal after the catalog gains it", func() {
+		bmi.Annotations[diskImageIDAnnotation] = "fedora-disk-image"
+		Expect(k8sClient.Update(ctx, bmi)).To(Succeed())
+		reconcile() // finalizer
+		fresh := reconcile()
+		Expect(fresh.Status.Phase).To(Equal(v1alpha1.BareMetalInstancePhaseFailed))
+
+		catalog := nicoTestBindings + "  - diskImageID: fedora-disk-image\n    nicoOperatingSystemID: nico-fedora-os\n"
+		Expect(os.WriteFile(reconciler.NicoBindingsConfigPath, []byte(catalog), 0600)).To(Succeed())
+		fresh = reconcile()
+		Expect(fresh.Status.Phase).To(Equal(v1alpha1.BareMetalInstancePhaseFailed))
+		Expect(fresh.Status.NicoCreateAttempted).To(BeFalse())
+		Expect(provider.launches).To(BeZero())
+	})
+
 	It("does not create from bindings without the version 2 Operating System catalog", func() {
 		Expect(os.WriteFile(reconciler.NicoBindingsConfigPath, []byte(nicoTestBindingsV1), 0600)).To(Succeed())
 		reconcile() // finalizer

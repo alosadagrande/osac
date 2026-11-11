@@ -56,6 +56,38 @@ func recordNicoCreateFailure(bmi *v1alpha1.BareMetalInstance, artifacts map[stri
 	return nil
 }
 
+// resolveNicoOperatingSystem resolves the approved NICo Operating System
+// before any create intent is recorded. It returns resolved=false when the
+// BMI must not be created now; the BMI status then explains why. An unsupported
+// DiskImage fails without contacting NICo, never booting a different image
+// while OSAC reports the requested one, and stays terminal.
+func (r *BareMetalInstanceReconciler) resolveNicoOperatingSystem(bmi *v1alpha1.BareMetalInstance) (string, bool, error) {
+	// The tenant already sees FAILED, so a later catalog change must not
+	// provision this BMI on its own.
+	if condition := bmi.GetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete); condition != nil &&
+		condition.Reason == v1alpha1.HostConditionReasonUnsupportedDiskImage {
+		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
+		return "", false, nil
+	}
+	operatingSystemID, err := r.nicoOperatingSystemFor(bmi)
+	if errors.Is(err, errNicoDiskImageUnsupported) {
+		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
+		bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
+			v1alpha1.HostConditionReasonUnsupportedDiskImage, err.Error())
+		return "", false, nil
+	}
+	if err != nil {
+		// A configuration error, such as bindings without the catalog. No create
+		// intent was recorded, so a later reconcile retries after the
+		// administrator fixes the ConfigMap.
+		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
+		bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
+			v1alpha1.HostConditionReasonTemplateFailed, "NICo Operating System catalog is unavailable")
+		return "", false, err
+	}
+	return operatingSystemID, true, nil
+}
+
 // failNicoCreate records a failed create job and its reported reason.
 func failNicoCreate(bmi *v1alpha1.BareMetalInstance, artifacts map[string]any) error {
 	if err := recordNicoCreateFailure(bmi, artifacts); err != nil {
@@ -118,24 +150,10 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaSProvisioning(
 	newAttempt := false
 	operatingSystemID := ""
 	if !bmi.Status.NicoCreateAttempted {
-		// Resolve the approved NICo Operating System before recording any create
-		// intent. An unsupported DiskImage must fail without contacting NICo,
-		// never boot a different image while OSAC reports the requested one.
+		var resolved bool
 		var err error
-		operatingSystemID, err = r.nicoOperatingSystemFor(bmi)
-		if errors.Is(err, errNicoDiskImageUnsupported) {
-			bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
-			bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
-				v1alpha1.HostConditionReasonUnsupportedDiskImage, err.Error())
-			return ctrl.Result{}, nil
-		}
-		if err != nil {
-			// A configuration error, such as bindings without the catalog. No
-			// create intent was recorded, so a later reconcile retries after the
-			// administrator fixes the ConfigMap.
-			bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
-			bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
-				v1alpha1.HostConditionReasonTemplateFailed, "NICo Operating System catalog is unavailable")
+		operatingSystemID, resolved, err = r.resolveNicoOperatingSystem(bmi)
+		if !resolved {
 			return ctrl.Result{}, err
 		}
 		// Persist the one-create-attempt marker BEFORE the AAP launch. A crash or
