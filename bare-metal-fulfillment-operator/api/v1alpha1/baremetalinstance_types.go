@@ -225,6 +225,10 @@ const (
 
 	// HostConditionReasonInvalidSelector indicates the host selector is missing or empty.
 	HostConditionReasonInvalidSelector = "InvalidSelector"
+
+	// HostConditionReasonUnsupportedDiskImage indicates the requested DiskImage has no
+	// approved provider operating system, so provisioning was not attempted.
+	HostConditionReasonUnsupportedDiskImage = "UnsupportedDiskImage"
 )
 
 // HostSelectorSpec defines host selection constraints.

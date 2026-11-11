@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -62,7 +63,28 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaSProvisioning(
 ) (ctrl.Result, error) {
 	latest := provisioning.FindLatestJobByType(bmi.Status.ProvisioningJobs, opv1alpha1.JobTypeProvision)
 	newAttempt := false
+	operatingSystemID := ""
 	if !bmi.Status.NicoCreateAttempted {
+		// Resolve the approved NICo Operating System before recording any create
+		// intent. An unsupported DiskImage must fail without contacting NICo,
+		// never boot a different image while OSAC reports the requested one.
+		var err error
+		operatingSystemID, err = r.nicoOperatingSystemFor(bmi)
+		if errors.Is(err, errNicoDiskImageUnsupported) {
+			bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
+			bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
+				v1alpha1.HostConditionReasonUnsupportedDiskImage, err.Error())
+			return ctrl.Result{}, nil
+		}
+		if err != nil {
+			// A configuration error, such as bindings without the catalog. No
+			// create intent was recorded, so a later reconcile retries after the
+			// administrator fixes the ConfigMap.
+			bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
+			bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
+				v1alpha1.HostConditionReasonTemplateFailed, "NICo Operating System catalog is unavailable")
+			return ctrl.Result{}, err
+		}
 		// Persist the one-create-attempt marker BEFORE the AAP launch. A crash or
 		// lost launch response must leave the BMI requiring Site verification,
 		// never silently issue another NICo POST.
@@ -85,7 +107,10 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaSProvisioning(
 		if !ok {
 			return ctrl.Result{}, fmt.Errorf("NICo BMI requires AAP extra vars for the one-time create authorization")
 		}
-		result, err := trigger.TriggerProvisionWithExtraVars(ctx, bmi, map[string]any{"nico_bmaas_create_allowed": true})
+		result, err := trigger.TriggerProvisionWithExtraVars(ctx, bmi, map[string]any{
+			"nico_bmaas_create_allowed":      true,
+			"nico_bmaas_operating_system_id": operatingSystemID,
+		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("NICo AAP launch outcome requires inspection before retry: %w", err)
 		}
