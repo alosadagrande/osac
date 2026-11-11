@@ -2,6 +2,12 @@
 - name: Validate NICo BMI backend configuration
   ansible.builtin.include_tasks: validate.yaml
 
+- name: Validate the approved NICo Operating System from the bare-metal operator
+  ansible.builtin.assert:
+    that:
+      - nico_bmaas_operating_system_id | default('') | length > 0
+    fail_msg: No approved NICo Operating System was passed by the bare-metal operator
+
 - name: Create or adopt one NICo Instance for this BMI
   nico.steps.bare_metal_instance:
     state: present
@@ -27,7 +33,6 @@
     network_virtualization_type: "{{ nico_bmaas_network_virtualization_type }}"
     flat_ipv4_cidr: "{{ nico_bmaas_flat_ipv4_cidr }}"
     operating_system_id: "{{ nico_bmaas_operating_system_id }}"
-    ipxe_script: "{{ nico_bmaas_ipxe_script }}"
     phone_home_enabled: "{{ nico_bmaas_phone_home_enabled }}"
     timeout: "{{ nico_bmaas_create_timeout }}"
     poll_interval: "{{ nico_bmaas_poll_interval }}"

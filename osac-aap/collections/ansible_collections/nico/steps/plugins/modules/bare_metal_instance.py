@@ -95,8 +95,10 @@ options:
       - The assigned NICo HostInband address must fall within this range.
   operating_system_id:
     type: str
-  ipxe_script:
-    type: str
+    description:
+      - Approved NICo Operating System for the BMI DiskImage. Required for create.
+      - Before a create, the module verifies it is a Ready templated iPXE definition synced to the
+        VPC's Site.
   phone_home_enabled:
     type: bool
     default: true
@@ -260,6 +262,23 @@ def wait_for_instance(client, instance_id, timeout, interval):
         time.sleep(interval)
 
 
+def check_operating_system(client, operating_system_id, site_id):
+    """Fail before any create unless the approved OS can boot and report at this Site."""
+    os_definition = get_or_none(client, "tenant", "operating-system/" + quote(operating_system_id, safe=""))
+    if os_definition is None:
+        raise NicoError(f"NICo Operating System {operating_system_id} not found")
+    if os_definition.get("status") != "Ready":
+        raise NicoError(f"NICo Operating System {operating_system_id} is not Ready")
+    if os_definition.get("type") != "TemplatedIpxe":
+        raise NicoError(f"NICo Operating System {operating_system_id} is not a templated iPXE definition")
+    # The OS phone-home flag is not checked: the Instance create sends its own
+    # phoneHomeEnabled, which takes precedence and makes NICo inject phone-home.
+    synced = any((association.get("site") or {}).get("id") == site_id and association.get("status") == "Synced"
+                 for association in os_definition.get("siteAssociations") or [])
+    if not site_id or not synced:
+        raise NicoError(f"NICo Operating System {operating_system_id} is not synced to the VPC's Site")
+
+
 def validate_network_configuration(params):
     mode = params["network_virtualization_type"]
     subnet_id, prefix_id = params["subnet_id"], params["vpc_prefix_id"]
@@ -321,8 +340,8 @@ def ensure_present(client):
     if bool(params["instance_type_id"]) == bool(target_machine_id):
         raise NicoError("configure exactly one of instance_type_id or target_machine_id")
     validate_network_configuration(params)
-    if not params["operating_system_id"] and not params["ipxe_script"]:
-        raise NicoError("operating_system_id or ipxe_script is required")
+    if not params["operating_system_id"]:
+        raise NicoError("operating_system_id is required")
     vpc = get_or_none(client, "tenant", "vpc/" + quote(params["vpc_id"], safe=""))
     if vpc is None or vpc.get("tenantId") != params["tenant_id"]:
         raise NicoError("configured NICo VPC is absent or belongs to another tenant")
@@ -357,6 +376,7 @@ def ensure_present(client):
                     raise NicoError("target Machine and configured VPC are not at the same Site")
                 if machine.get("status") != "Ready" or machine.get("instanceId") is not None:
                     raise NicoError("target Machine is not unassigned Ready")
+            check_operating_system(client, params["operating_system_id"], vpc.get("siteId"))
             body = {"name": params["name"], "tenantId": params["tenant_id"],
                     "vpcId": params["vpc_id"],
                     "labels": {"osacBmiUid": params["bmi_uid"]},
@@ -368,10 +388,7 @@ def ensure_present(client):
                 interface = {"isPhysical": True}
                 interface["subnetId" if params["subnet_id"] else "vpcPrefixId"] = params["subnet_id"] or params["vpc_prefix_id"]
                 body["interfaces"] = [interface]
-            if params["operating_system_id"]:
-                body["operatingSystemId"] = params["operating_system_id"]
-            if params["ipxe_script"]:
-                body["ipxeScript"] = params["ipxe_script"]
+            body["operatingSystemId"] = params["operating_system_id"]
             try:
                 _, instance = client.request("tenant", "POST", "instance", body)
             except NicoError as exc:
@@ -444,7 +461,7 @@ def main():
         network_virtualization_type=dict(type="str", default="ETHERNET_VIRTUALIZER",
                                          choices=["ETHERNET_VIRTUALIZER", "FNN", "FLAT"]),
         flat_ipv4_cidr=dict(type="str", default=""),
-        operating_system_id=dict(type="str", default=""), ipxe_script=dict(type="str", default=""),
+        operating_system_id=dict(type="str", default=""),
         phone_home_enabled=dict(type="bool", default=True),
         timeout=dict(type="int", default=2700), poll_interval=dict(type="int", default=10),
     ), supports_check_mode=False)

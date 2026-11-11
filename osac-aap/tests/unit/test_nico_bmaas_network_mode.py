@@ -27,8 +27,7 @@ def params(mode="FLAT", **overrides):
         "flat_ipv4_cidr": "172.16.200.0/24" if mode == "FLAT" else "",
         "subnet_id": "subnet-id" if mode == "ETHERNET_VIRTUALIZER" else "",
         "vpc_prefix_id": "prefix-id" if mode == "FNN" else "",
-        "operating_system_id": "",
-        "ipxe_script": "#!ipxe\nexit",
+        "operating_system_id": "os-id",
         "phone_home_enabled": True,
         "instance_id": "",
         "machine_id": "",
@@ -40,12 +39,26 @@ def params(mode="FLAT", **overrides):
     return result
 
 
+def ready_operating_system(**overrides):
+    definition = {
+        "id": "os-id",
+        "status": "Ready",
+        "type": "TemplatedIpxe",
+        "phoneHomeEnabled": True,
+        "siteAssociations": [{"site": {"id": "site-id"}, "status": "Synced"}],
+    }
+    definition.update(overrides)
+    return definition
+
+
 class FakeClient:
-    def __init__(self, parameters, interfaces=None, target_machine=None, ready_machine_id="machine-id"):
+    def __init__(self, parameters, interfaces=None, target_machine=None, ready_machine_id="machine-id",
+                 operating_system=None):
         self.params = parameters
         self.interfaces = interfaces
         self.target_machine = target_machine
         self.ready_machine_id = ready_machine_id
+        self.operating_system = ready_operating_system() if operating_system is None else operating_system
         self.posts = []
 
     def request(self, scope, method, resource, body=None):
@@ -62,6 +75,10 @@ class FakeClient:
             }
         if (method, resource) == ("GET", "instance?name=osac-bmi-uid"):
             return 200, []
+        if (method, resource) == ("GET", "operating-system/os-id"):
+            if self.operating_system is False:
+                raise nico.NicoHTTPError(404, "not found")
+            return 200, self.operating_system
         if (method, resource) == ("POST", "instance"):
             self.posts.append(body)
             return 201, {"id": "instance-id"}
@@ -229,6 +246,57 @@ def test_create_requires_one_placement_selector(instance_type_id, target_machine
         nico.ensure_present(client)
 
     assert client.posts == []
+
+
+def test_create_boots_only_the_approved_operating_system():
+    client = FakeClient(params("FNN"),
+                        interfaces=[{"vpcPrefixId": "prefix-id", "ipAddresses": ["198.51.100.20"]}])
+
+    nico.ensure_present(client)
+
+    assert client.posts[0]["operatingSystemId"] == "os-id"
+    assert "ipxeScript" not in client.posts[0]
+
+
+def test_create_requires_an_operating_system():
+    client = FakeClient(params("FNN", operating_system_id=""))
+
+    with pytest.raises(nico.NicoError, match="operating_system_id is required"):
+        nico.ensure_present(client)
+
+    assert client.posts == []
+
+
+@pytest.mark.parametrize(
+    ("operating_system", "message"),
+    [
+        (False, "not found"),
+        (ready_operating_system(status="Syncing"), "is not Ready"),
+        (ready_operating_system(type="Ipxe"), "not a templated iPXE definition"),
+        (ready_operating_system(siteAssociations=[]), "not synced to the VPC's Site"),
+        (ready_operating_system(siteAssociations=[{"site": {"id": "site-id"}, "status": "Syncing"}]),
+         "not synced to the VPC's Site"),
+        (ready_operating_system(siteAssociations=[{"site": {"id": "another-site"}, "status": "Synced"}]),
+         "not synced to the VPC's Site"),
+    ],
+)
+def test_create_refuses_an_unusable_operating_system_before_post(operating_system, message):
+    client = FakeClient(params("FNN"), operating_system=operating_system)
+
+    with pytest.raises(nico.NicoError, match=message):
+        nico.ensure_present(client)
+
+    assert client.posts == []
+
+
+def test_create_accepts_an_operating_system_without_phone_home():
+    # The Instance phoneHomeEnabled overrides the OS value in NICo.
+    client = FakeClient(params("FNN"), operating_system=ready_operating_system(phoneHomeEnabled=False),
+                        interfaces=[{"vpcPrefixId": "prefix-id", "ipAddresses": ["198.51.100.20"]}])
+
+    nico.ensure_present(client)
+
+    assert client.posts[0]["phoneHomeEnabled"] is True
 
 
 @pytest.mark.parametrize("enabled", [True, False])
