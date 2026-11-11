@@ -19,6 +19,8 @@
       ansible.builtin.set_fact:
         nico_bmaas_template_params: "{{ bare_metal_instance.spec.templateParameters | default('{}', true) | from_json }}"
 
+    # The fulfillment service creates the Secret right after the BMI, so the
+    # job can start first. Wait for it instead of failing the only create.
     - name: Read the tenant user data Secret created by the fulfillment service
       kubernetes.core.k8s_info:
         api_version: v1
@@ -26,6 +28,9 @@
         namespace: "{{ bare_metal_instance.metadata.namespace }}"
         name: "{{ nico_bmaas_template_params.userDataSecret }}"
       register: nico_bmaas_user_data_secret
+      until: nico_bmaas_user_data_secret.resources | default([]) | length == 1
+      retries: "{{ nico_bmaas_user_data_secret_retries }}"
+      delay: 5
       when: nico_bmaas_template_params.userDataSecret | default('') | length > 0
       no_log: true
 
