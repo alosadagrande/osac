@@ -29,6 +29,8 @@ type nicoPilotProvider struct {
 	expectedCredentialIDs []int
 	// provisionState is the create job state; empty means Succeeded.
 	provisionState opv1alpha1.JobState
+	// deprovisionOutputs overrides the default released artifacts when set.
+	deprovisionOutputs map[string]any
 }
 
 func (p *nicoPilotProvider) TriggerProvisionWithExtraVars(ctx context.Context, _ client.Object, vars map[string]any) (*provisioning.ProvisionResult, error) {
@@ -51,13 +53,17 @@ func (p *nicoPilotProvider) GetProvisionStatusWithExtraVars(_ context.Context, _
 }
 
 func (p *nicoPilotProvider) GetDeprovisionStatusWithExtraVars(_ context.Context, _ client.Object, jobID string) (provisioning.ProvisionStatusWithExtraVars, error) {
-	return provisioning.ProvisionStatusWithExtraVars{
-		ProvisionStatus: provisioning.ProvisionStatus{JobID: jobID, State: opv1alpha1.JobStateSucceeded},
-		ExtraVars: map[string]any{
+	outputs := p.deprovisionOutputs
+	if outputs == nil {
+		outputs = map[string]any{
 			"nicoInstanceID":    "nico-instance-1",
 			"nicoMachineID":     "nico-machine-1",
 			"nicoCleanupStatus": "Released",
-		},
+		}
+	}
+	return provisioning.ProvisionStatusWithExtraVars{
+		ProvisionStatus: provisioning.ProvisionStatus{JobID: jobID, State: opv1alpha1.JobStateSucceeded},
+		ExtraVars:       outputs,
 	}, nil
 }
 
@@ -389,6 +395,29 @@ var _ = Describe("NICo BareMetalInstance lifecycle", func() {
 			Expect(k8sClient.Get(ctx, req.NamespacedName, &v1alpha1.BareMetalInstance{})).ToNot(Succeed())
 		})
 
+		It("releases a created Instance that never got a Machine", func() {
+			provider.outputs = map[string]any{
+				"nicoCreateOutcome": "Created",
+				"nicoInstanceID":    "nico-instance-1",
+				"nicoFailureReason": "Instance nico-instance-1 did not reach Ready before timeout",
+			}
+			provider.deprovisionOutputs = map[string]any{
+				"nicoInstanceID":    "nico-instance-1",
+				"nicoMachineID":     "",
+				"nicoCleanupStatus": "Released",
+			}
+			fresh := createAndFail()
+			Expect(fresh.Status.NicoInstanceID).To(Equal("nico-instance-1"))
+			Expect(fresh.Status.NicoMachineID).To(BeEmpty())
+
+			Expect(k8sClient.Delete(ctx, fresh)).To(Succeed())
+			reconcile() // launch deprovision with the Instance ID only
+			Expect(deprovisionLaunches).To(Equal(1))
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &v1alpha1.BareMetalInstance{})).ToNot(Succeed())
+		})
+
 		It("keeps reported IDs from an uncertain outcome and releases them through NICo", func() {
 			provider.outputs = map[string]any{
 				"nicoCreateOutcome": "Uncertain",
@@ -416,7 +445,7 @@ var _ = Describe("NICo BareMetalInstance lifecycle", func() {
 
 			Expect(k8sClient.Delete(ctx, fresh)).To(Succeed())
 			_, err := reconciler.Reconcile(ctx, req)
-			Expect(err).To(MatchError(ContainSubstring("without both provider IDs")))
+			Expect(err).To(MatchError(ContainSubstring("without a provider Instance ID")))
 			Expect(k8sClient.Get(ctx, req.NamespacedName, fresh)).To(Succeed())
 			Expect(controllerutil.ContainsFinalizer(fresh, BareMetalInstanceManagementFinalizer)).To(BeTrue())
 			Expect(deprovisionLaunches).To(BeZero())

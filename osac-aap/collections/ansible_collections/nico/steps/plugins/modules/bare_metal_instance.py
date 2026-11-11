@@ -531,8 +531,8 @@ def ensure_present(client, progress=None):
 def ensure_absent(client):
     params = client.params
     instance_id, machine_id = params["instance_id"], params["machine_id"]
-    if not instance_id or not machine_id:
-        raise NicoError("saved Instance and Machine IDs are both required for safe delete")
+    if not instance_id:
+        raise NicoError("saved Instance ID is required for safe delete")
     instance = get_or_none(client, "tenant", instance_path(instance_id))
     if instance is not None:
         assert_owned(instance, params, machine_id)
@@ -542,6 +542,10 @@ def ensure_absent(client):
     deadline = time.monotonic() + params["timeout"]
     while True:
         instance = get_or_none(client, "tenant", instance_path(instance_id))
+        if instance is None and not machine_id:
+            # The create failed before NICo assigned a Machine, so the Instance
+            # never held a tray and its absence completes the cleanup.
+            return {"changed": changed, "instance_id": instance_id, "machine_id": "", "status": "Released"}
         if instance is None:
             machine = get_or_none(client, "provider", machine_path(machine_id))
             if machine is None:

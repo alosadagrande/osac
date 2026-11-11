@@ -281,8 +281,8 @@ func (r *BareMetalInstanceReconciler) resolveNicoIDsForDelete(ctx context.Contex
 			return ctrl.Result{}, r.Update(ctx, bmi)
 		}
 	}
-	if bmi.Status.NicoInstanceID == "" || bmi.Status.NicoMachineID == "" {
-		return ctrl.Result{}, fmt.Errorf("NICo create ended without both provider IDs; verify Site allocation before deletion")
+	if bmi.Status.NicoInstanceID == "" {
+		return ctrl.Result{}, fmt.Errorf("NICo create ended without a provider Instance ID; verify Site allocation before deletion")
 	}
 	return ctrl.Result{RequeueAfter: r.ProvisionPollIntervalDuration}, nil
 }
@@ -307,7 +307,9 @@ func (r *BareMetalInstanceReconciler) deleteNicoBMaaS(ctx context.Context, bmi *
 	if r.ProvisioningProvider == nil {
 		return ctrl.Result{}, fmt.Errorf("NICo BMI deletion requires a provisioning provider")
 	}
-	if bmi.Status.NicoInstanceID == "" || bmi.Status.NicoMachineID == "" {
+	// A failed create can leave an Instance with no Machine assigned; the
+	// Instance ID alone is enough to release it.
+	if bmi.Status.NicoInstanceID == "" {
 		return r.resolveNicoIDsForDelete(ctx, bmi)
 	}
 	boundCtx, err := r.withNicoCredentials(ctx, bmi)
