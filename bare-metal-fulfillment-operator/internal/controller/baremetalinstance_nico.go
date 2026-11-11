@@ -61,7 +61,9 @@ func recordNicoCreateFailure(bmi *v1alpha1.BareMetalInstance, artifacts map[stri
 // BMI must not be created now; the BMI status then explains why. An unsupported
 // DiskImage fails without contacting NICo, never booting a different image
 // while OSAC reports the requested one, and stays terminal.
-func (r *BareMetalInstanceReconciler) resolveNicoOperatingSystem(bmi *v1alpha1.BareMetalInstance) (string, bool, error) {
+func (r *BareMetalInstanceReconciler) resolveNicoOperatingSystem(
+	bmi *v1alpha1.BareMetalInstance, bindings *nicoBindingsFile,
+) (string, bool, error) {
 	// The tenant already sees FAILED, so a later catalog change must not
 	// provision this BMI on its own.
 	if condition := bmi.GetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete); condition != nil &&
@@ -69,7 +71,7 @@ func (r *BareMetalInstanceReconciler) resolveNicoOperatingSystem(bmi *v1alpha1.B
 		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
 		return "", false, nil
 	}
-	operatingSystemID, err := r.nicoOperatingSystemFor(bmi)
+	operatingSystemID, err := nicoOperatingSystemFor(bindings, bmi)
 	if errors.Is(err, errNicoDiskImageUnsupported) {
 		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
 		bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
@@ -128,7 +130,7 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaS(ctx context.Context, bm
 		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseProgressing
 		return ctrl.Result{}, nil
 	}
-	boundCtx, err := r.withNicoCredentials(ctx, bmi)
+	boundCtx, bindings, err := r.withNicoCredentials(ctx, bmi)
 	if err != nil {
 		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
 		bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
@@ -140,11 +142,12 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaS(ctx context.Context, bm
 	if !ok {
 		return ctrl.Result{}, fmt.Errorf("NICo BMI requires AAP provision output artifacts")
 	}
-	return r.reconcileNicoBMaaSProvisioning(boundCtx, bmi, outputs)
+	return r.reconcileNicoBMaaSProvisioning(boundCtx, bmi, outputs, bindings)
 }
 
 func (r *BareMetalInstanceReconciler) reconcileNicoBMaaSProvisioning(
 	ctx context.Context, bmi *v1alpha1.BareMetalInstance, outputs provisioning.ProvisioningProviderWithProvisionOutputs,
+	bindings *nicoBindingsFile,
 ) (ctrl.Result, error) {
 	latest := provisioning.FindLatestJobByType(bmi.Status.ProvisioningJobs, opv1alpha1.JobTypeProvision)
 	newAttempt := false
@@ -152,7 +155,7 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaSProvisioning(
 	if !bmi.Status.NicoCreateAttempted {
 		var resolved bool
 		var err error
-		operatingSystemID, resolved, err = r.resolveNicoOperatingSystem(bmi)
+		operatingSystemID, resolved, err = r.resolveNicoOperatingSystem(bmi, bindings)
 		if !resolved {
 			return ctrl.Result{}, err
 		}
@@ -330,7 +333,7 @@ func (r *BareMetalInstanceReconciler) deleteNicoBMaaS(ctx context.Context, bmi *
 	if bmi.Status.NicoInstanceID == "" {
 		return r.resolveNicoIDsForDelete(ctx, bmi)
 	}
-	boundCtx, err := r.withNicoCredentials(ctx, bmi)
+	boundCtx, _, err := r.withNicoCredentials(ctx, bmi)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

@@ -106,26 +106,29 @@ func (r *BareMetalInstanceReconciler) loadNicoBindings() (*nicoBindingsFile, err
 	return &config, nil
 }
 
-func (r *BareMetalInstanceReconciler) withNicoCredentials(ctx context.Context, bmi *v1alpha1.BareMetalInstance) (context.Context, error) {
+// withNicoCredentials selects the AWX credentials bound to the BMI tenant and
+// Subnet. It also returns the validated bindings file, so a reconcile reads it
+// once.
+func (r *BareMetalInstanceReconciler) withNicoCredentials(ctx context.Context, bmi *v1alpha1.BareMetalInstance) (context.Context, *nicoBindingsFile, error) {
 	if len(bmi.Spec.NetworkAttachments) != 1 {
-		return nil, fmt.Errorf("NICo tenant binding requires one OSAC Subnet")
+		return nil, nil, fmt.Errorf("NICo tenant binding requires one OSAC Subnet")
 	}
 	tenantID := bmi.Annotations["osac.openshift.io/tenant"]
 	subnetID := bmi.Spec.NetworkAttachments[0].SubnetRef
 	if tenantID == "" || subnetID == "" {
-		return nil, fmt.Errorf("NICo tenant binding requires a BMI tenant and Subnet ID")
+		return nil, nil, fmt.Errorf("NICo tenant binding requires a BMI tenant and Subnet ID")
 	}
 	config, err := r.loadNicoBindings()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i := range config.Bindings {
 		binding := &config.Bindings[i]
 		if binding.OSACTenantID == tenantID && binding.OSACSubnetID == subnetID {
-			return provisioning.WithAAPCredentialIDs(ctx, binding.CredentialIDs), nil
+			return provisioning.WithAAPCredentialIDs(ctx, binding.CredentialIDs), config, nil
 		}
 	}
-	return nil, fmt.Errorf("no NICo tenant binding for BMI tenant and Subnet")
+	return nil, nil, fmt.Errorf("no NICo tenant binding for BMI tenant and Subnet")
 }
 
 // nicoOperatingSystemFor returns the NICo Operating System approved for the
@@ -133,11 +136,7 @@ func (r *BareMetalInstanceReconciler) withNicoCredentials(ctx context.Context, b
 // catalog, so it is a configuration error. A BMI without a DiskImage ID, or
 // with a DiskImage that has no catalog entry, gets errNicoDiskImageUnsupported;
 // there is no default Operating System.
-func (r *BareMetalInstanceReconciler) nicoOperatingSystemFor(bmi *v1alpha1.BareMetalInstance) (string, error) {
-	config, err := r.loadNicoBindings()
-	if err != nil {
-		return "", err
-	}
+func nicoOperatingSystemFor(config *nicoBindingsFile, bmi *v1alpha1.BareMetalInstance) (string, error) {
 	if config.Version != 2 {
 		return "", fmt.Errorf("NICo BMI creation requires the Operating System catalog in bindings version 2")
 	}
