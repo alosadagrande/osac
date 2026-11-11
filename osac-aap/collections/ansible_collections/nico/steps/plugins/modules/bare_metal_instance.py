@@ -256,12 +256,15 @@ def assert_owned(instance, params, machine_id=None):
         raise NicoError("Instance Machine ID differs from the saved BMI Machine ID")
 
 
-def wait_for_instance(client, instance_id, timeout, interval):
+def wait_for_instance(client, instance_id, timeout, interval, progress=None):
     deadline = time.monotonic() + timeout
     while True:
         instance = get_or_none(client, "tenant", instance_path(instance_id))
         if instance is None:
             raise NicoError("Instance vanished while waiting for Ready")
+        if progress is not None and instance.get("machineId"):
+            # Keep the allocated Machine so a later failure can still be released.
+            progress["machine_id"] = instance["machineId"]
         status = instance.get("status")
         if status in ("Ready", "BootCompleted"):
             return instance
@@ -411,8 +414,17 @@ def compose_user_data(user_data, ssh_public_key):
     return CLOUD_CONFIG_HEADER + "\n" + yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
 
 
-def ensure_present(client):
+# Create outcomes reported on failure, so the BMI controller knows whether a
+# NICo Instance may exist and must be released on delete.
+OUTCOME_NOT_CREATED = "NotCreated"  # Failed before the create POST.
+OUTCOME_UNCERTAIN = "Uncertain"  # The create POST outcome is unknown.
+OUTCOME_CREATED = "Created"  # The Instance exists; its IDs are reported when known.
+
+
+def ensure_present(client, progress=None):
     params = client.params
+    progress = {} if progress is None else progress
+    progress.update(outcome=OUTCOME_NOT_CREATED, instance_id="", machine_id="")
     for key in ("name", "vpc_id"):
         if not params[key]:
             raise NicoError(f"{key} is required for Instance create")
@@ -431,6 +443,7 @@ def ensure_present(client):
         raise NicoError("configured NICo VPC network type differs from BMI backend mode")
 
     if params["instance_id"]:
+        progress.update(outcome=OUTCOME_CREATED, instance_id=params["instance_id"], machine_id=params["machine_id"])
         instance = get_or_none(client, "tenant", instance_path(params["instance_id"]))
         if instance is None:
             raise NicoError("saved Instance ID is absent; refusing a second create")
@@ -446,6 +459,8 @@ def ensure_present(client):
         if matches:
             instance = matches[0]
             assert_owned(instance, params)
+            progress.update(outcome=OUTCOME_CREATED, instance_id=instance.get("id") or "",
+                            machine_id=instance.get("machineId") or "")
             changed = False
         else:
             if not params["create_allowed"]:
@@ -473,6 +488,7 @@ def ensure_present(client):
             body["operatingSystemId"] = params["operating_system_id"]
             if user_data is not None:
                 body["userData"] = user_data
+            progress["outcome"] = OUTCOME_UNCERTAIN
             try:
                 _, instance = client.request("tenant", "POST", "instance", body)
             except NicoError as exc:
@@ -481,7 +497,10 @@ def ensure_present(client):
     instance_id = instance.get("id")
     if not instance_id:
         raise NicoError("NICo Instance response has no ID; verify Site allocation before retrying")
-    instance = wait_for_instance(client, instance_id, params["timeout"], params["poll_interval"])
+    progress.update(outcome=OUTCOME_CREATED, instance_id=instance_id)
+    if instance.get("machineId"):
+        progress["machine_id"] = instance["machineId"]
+    instance = wait_for_instance(client, instance_id, params["timeout"], params["poll_interval"], progress)
     assert_owned(instance, params, params["machine_id"])
     if instance.get("vpcId") != params["vpc_id"]:
         raise NicoError("Ready Instance VPC differs from the configured BMI backend")
@@ -550,14 +569,22 @@ def main():
         phone_home_enabled=dict(type="bool", default=True),
         timeout=dict(type="int", default=2700), poll_interval=dict(type="int", default=10),
     ), supports_check_mode=False)
+    progress = {"outcome": OUTCOME_NOT_CREATED, "instance_id": "", "machine_id": ""}
     try:
         if module.params["timeout"] <= 0 or module.params["poll_interval"] <= 0:
             raise NicoError("timeout and poll_interval must be positive")
         client = NicoClient(module)
-        result = ensure_present(client) if module.params["state"] == "present" else ensure_absent(client)
+        if module.params["state"] == "present":
+            result = ensure_present(client, progress)
+        else:
+            result = ensure_absent(client)
         module.exit_json(**result)
     except NicoError as exc:
-        module.fail_json(msg=str(exc))
+        failure = {"msg": str(exc)}
+        if module.params["state"] == "present":
+            failure.update(nico_create_outcome=progress["outcome"], instance_id=progress["instance_id"],
+                           machine_id=progress["machine_id"])
+        module.fail_json(**failure)
 
 
 if __name__ == "__main__":
