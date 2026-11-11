@@ -420,6 +420,10 @@ OUTCOME_NOT_CREATED = "NotCreated"  # Failed before the create POST.
 OUTCOME_UNCERTAIN = "Uncertain"  # The create POST outcome is unknown.
 OUTCOME_CREATED = "Created"  # The Instance exists; its IDs are reported when known.
 
+# Create POST responses where NICo validated and refused the request, so no
+# Instance exists. A conflict (409) or server error keeps the outcome uncertain.
+CREATE_REJECTED_STATUSES = (400, 403, 422)
+
 
 def ensure_present(client, progress=None):
     params = client.params
@@ -491,6 +495,12 @@ def ensure_present(client, progress=None):
             progress["outcome"] = OUTCOME_UNCERTAIN
             try:
                 _, instance = client.request("tenant", "POST", "instance", body)
+            except NicoHTTPError as exc:
+                if exc.status in CREATE_REJECTED_STATUSES:
+                    # NICo validated and refused the request: nothing was created.
+                    progress["outcome"] = OUTCOME_NOT_CREATED
+                    raise NicoError("NICo rejected the Instance create: " + str(exc)) from exc
+                raise NicoError("Instance create outcome requires Site verification before another POST: " + str(exc)) from exc
             except NicoError as exc:
                 raise NicoError("Instance create outcome requires Site verification before another POST: " + str(exc)) from exc
             changed = True

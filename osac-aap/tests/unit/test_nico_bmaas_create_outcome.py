@@ -77,6 +77,40 @@ def test_failed_post_reports_uncertain():
     assert progress == {"outcome": "Uncertain", "instance_id": "", "machine_id": ""}
 
 
+def rejecting_post(client, status):
+    original = client.request
+
+    def response(scope, method, resource, body=None):
+        if (method, resource) == ("POST", "instance"):
+            raise nico.NicoHTTPError(status, "request rejected")
+        return original(scope, method, resource, body)
+
+    client.request = response
+    return client
+
+
+@pytest.mark.parametrize("status", [400, 403, 422])
+def test_post_rejected_by_nico_reports_not_created(status):
+    client = rejecting_post(FakeClient(params("FNN")), status)
+    progress = {}
+
+    with pytest.raises(nico.NicoError, match="NICo rejected the Instance create"):
+        nico.ensure_present(client, progress)
+
+    assert progress == {"outcome": "NotCreated", "instance_id": "", "machine_id": ""}
+
+
+@pytest.mark.parametrize("status", [409, 500, 503])
+def test_post_conflict_or_server_error_stays_uncertain(status):
+    client = rejecting_post(FakeClient(params("FNN")), status)
+    progress = {}
+
+    with pytest.raises(nico.NicoError, match="requires Site verification"):
+        nico.ensure_present(client, progress)
+
+    assert progress["outcome"] == "Uncertain"
+
+
 def test_boot_timeout_after_create_reports_the_ids_to_release(fast_clock):
     # NICo allocated the Machine but the OS never phoned home.
     client = with_instance(FakeClient(params("FNN", timeout=60, poll_interval=10), interfaces=FNN_INTERFACES),
