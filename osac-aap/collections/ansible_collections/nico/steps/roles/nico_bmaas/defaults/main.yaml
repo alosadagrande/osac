@@ -44,8 +44,5 @@ nico_bmaas_provider_auth:
 nico_bmaas_create_timeout: 2700
 # Delete waits for the Instance to disappear and the Machine to return Ready.
 nico_bmaas_delete_timeout: 1800
-# NICo reports Ready only after the booted OS phones home. Without it, Ready
-# proves allocation, not an installed OS.
-nico_bmaas_phone_home_enabled: true
 nico_bmaas_poll_interval: 10
 nico_bmaas_create_allowed: false

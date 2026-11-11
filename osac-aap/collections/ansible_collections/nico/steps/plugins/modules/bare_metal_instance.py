@@ -98,7 +98,7 @@ options:
     description:
       - Approved NICo Operating System for the BMI DiskImage. Required for create.
       - Before a create, the module verifies it is a Ready templated iPXE definition synced to the
-        VPC's Site.
+        VPC's Site that delivers the Instance user data through the tenant cloud-init datasource.
   phone_home_enabled:
     type: bool
     default: true
@@ -262,6 +262,27 @@ def wait_for_instance(client, instance_id, timeout, interval):
         time.sleep(interval)
 
 
+# iPXE variable that NICo sets on every boot. The PXE service behind it returns
+# the user data of the Instance assigned to the requesting Machine.
+TENANT_CLOUD_INIT_URL = "${tenant-cloudinit-url}"
+
+
+def delivers_user_data(client, os_definition):
+    """Whether the OS boot passes the Instance user data to the installed OS.
+
+    The cloud-init datasource can be a template parameter (for example ds for
+    qcow-image) or part of the template itself (for example ubuntu-autoinstall).
+    """
+    for parameter in os_definition.get("ipxeTemplateParameters") or []:
+        if TENANT_CLOUD_INIT_URL in str(parameter.get("value") or ""):
+            return True
+    template_id = os_definition.get("ipxeTemplateId")
+    if not template_id:
+        return False
+    template = get_or_none(client, "tenant", "ipxe-template/" + quote(template_id, safe=""))
+    return template is not None and TENANT_CLOUD_INIT_URL in str(template.get("template") or "")
+
+
 def check_operating_system(client, operating_system_id, site_id):
     """Fail before any create unless the approved OS can boot and report at this Site."""
     os_definition = get_or_none(client, "tenant", "operating-system/" + quote(operating_system_id, safe=""))
@@ -273,6 +294,11 @@ def check_operating_system(client, operating_system_id, site_id):
         raise NicoError(f"NICo Operating System {operating_system_id} is not a templated iPXE definition")
     # The OS phone-home flag is not checked: the Instance create sends its own
     # phoneHomeEnabled, which takes precedence and makes NICo inject phone-home.
+    # The OS must, however, carry the user data (SSH key and phone-home block)
+    # to the installed OS, or the Instance can never become Ready.
+    if not delivers_user_data(client, os_definition):
+        raise NicoError(f"NICo Operating System {operating_system_id} does not deliver user data to the "
+                        f"installed OS (no {TENANT_CLOUD_INIT_URL} cloud-init datasource)")
     synced = any((association.get("site") or {}).get("id") == site_id and association.get("status") == "Synced"
                  for association in os_definition.get("siteAssociations") or [])
     if not site_id or not synced:

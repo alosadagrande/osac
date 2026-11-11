@@ -33,7 +33,8 @@
     network_virtualization_type: "{{ nico_bmaas_network_virtualization_type }}"
     flat_ipv4_cidr: "{{ nico_bmaas_flat_ipv4_cidr }}"
     operating_system_id: "{{ nico_bmaas_operating_system_id }}"
-    phone_home_enabled: "{{ nico_bmaas_phone_home_enabled }}"
+    # Always on: OSAC reports RUNNING only after the booted OS phones home.
+    phone_home_enabled: true
     timeout: "{{ nico_bmaas_create_timeout }}"
     poll_interval: "{{ nico_bmaas_poll_interval }}"
   register: nico_bmaas_result

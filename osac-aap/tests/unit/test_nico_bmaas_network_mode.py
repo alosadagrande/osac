@@ -45,20 +45,29 @@ def ready_operating_system(**overrides):
         "status": "Ready",
         "type": "TemplatedIpxe",
         "phoneHomeEnabled": True,
+        "ipxeTemplateId": "qcow-template-id",
+        "ipxeTemplateParameters": [
+            {"name": "image_url", "value": "http://artifacts/centos.qcow2"},
+            {"name": "ds", "value": "nocloud-net;s=${tenant-cloudinit-url}"},
+        ],
         "siteAssociations": [{"site": {"id": "site-id"}, "status": "Synced"}],
     }
     definition.update(overrides)
     return definition
 
 
+NO_DATASOURCE_PARAMETERS = [{"name": "image_url", "value": "http://artifacts/centos.qcow2"}]
+
+
 class FakeClient:
     def __init__(self, parameters, interfaces=None, target_machine=None, ready_machine_id="machine-id",
-                 operating_system=None):
+                 operating_system=None, template_body="chain qcow-imager.efi image_url={{image_url}} {{extra}}"):
         self.params = parameters
         self.interfaces = interfaces
         self.target_machine = target_machine
         self.ready_machine_id = ready_machine_id
         self.operating_system = ready_operating_system() if operating_system is None else operating_system
+        self.template_body = template_body
         self.posts = []
 
     def request(self, scope, method, resource, body=None):
@@ -79,6 +88,8 @@ class FakeClient:
             if self.operating_system is False:
                 raise nico.NicoHTTPError(404, "not found")
             return 200, self.operating_system
+        if (method, resource) == ("GET", "ipxe-template/qcow-template-id"):
+            return 200, {"id": "qcow-template-id", "template": self.template_body}
         if (method, resource) == ("POST", "instance"):
             self.posts.append(body)
             return 201, {"id": "instance-id"}
@@ -273,6 +284,9 @@ def test_create_requires_an_operating_system():
         (False, "not found"),
         (ready_operating_system(status="Syncing"), "is not Ready"),
         (ready_operating_system(type="Ipxe"), "not a templated iPXE definition"),
+        (ready_operating_system(ipxeTemplateParameters=NO_DATASOURCE_PARAMETERS), "does not deliver user data"),
+        (ready_operating_system(ipxeTemplateParameters=NO_DATASOURCE_PARAMETERS, ipxeTemplateId=None),
+         "does not deliver user data"),
         (ready_operating_system(siteAssociations=[]), "not synced to the VPC's Site"),
         (ready_operating_system(siteAssociations=[{"site": {"id": "site-id"}, "status": "Syncing"}]),
          "not synced to the VPC's Site"),
@@ -287,6 +301,18 @@ def test_create_refuses_an_unusable_operating_system_before_post(operating_syste
         nico.ensure_present(client)
 
     assert client.posts == []
+
+
+def test_create_accepts_a_template_that_embeds_the_cloud_init_datasource():
+    # For example ubuntu-autoinstall carries ds=nocloud-net in its template body.
+    client = FakeClient(params("FNN"),
+                        operating_system=ready_operating_system(ipxeTemplateParameters=NO_DATASOURCE_PARAMETERS),
+                        template_body="kernel {{kernel}} autoinstall ds=nocloud-net;s=${tenant-cloudinit-url}",
+                        interfaces=[{"vpcPrefixId": "prefix-id", "ipAddresses": ["198.51.100.20"]}])
+
+    nico.ensure_present(client)
+
+    assert len(client.posts) == 1
 
 
 def test_create_accepts_an_operating_system_without_phone_home():
