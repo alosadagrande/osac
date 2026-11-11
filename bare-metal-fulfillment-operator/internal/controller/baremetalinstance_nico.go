@@ -18,6 +18,56 @@ import (
 
 const nicoBMaaSTemplateID = "osac.templates.nico_bm_host_provisioning"
 
+// Create outcomes published by a failed NICo create job.
+const (
+	nicoCreateOutcomeNotCreated = "NotCreated"
+	nicoCreateOutcomeUncertain  = "Uncertain"
+	nicoCreateOutcomeCreated    = "Created"
+)
+
+// recordNicoCreateFailure saves what a failed create job reported, so delete
+// knows whether a NICo Instance may exist. A job without a known outcome, for
+// example a canceled one, is uncertain and keeps the conservative behavior.
+func recordNicoCreateFailure(bmi *v1alpha1.BareMetalInstance, artifacts map[string]any) error {
+	outcome, _ := artifacts["nicoCreateOutcome"].(string)
+	switch outcome {
+	case nicoCreateOutcomeNotCreated, nicoCreateOutcomeUncertain:
+		bmi.Status.NicoCreateOutcome = outcome
+	case nicoCreateOutcomeCreated:
+		instanceID, _ := artifacts["nicoInstanceID"].(string)
+		machineID, _ := artifacts["nicoMachineID"].(string)
+		if instanceID != "" && bmi.Status.NicoInstanceID != "" && bmi.Status.NicoInstanceID != instanceID ||
+			machineID != "" && bmi.Status.NicoMachineID != "" && bmi.Status.NicoMachineID != machineID {
+			return fmt.Errorf("NICo AAP artifacts differ from saved provider IDs")
+		}
+		bmi.Status.NicoCreateOutcome = outcome
+		if instanceID != "" {
+			bmi.Status.NicoInstanceID = instanceID
+		}
+		if machineID != "" {
+			bmi.Status.NicoMachineID = machineID
+		}
+	default:
+		bmi.Status.NicoCreateOutcome = nicoCreateOutcomeUncertain
+	}
+	return nil
+}
+
+// failNicoCreate records a failed create job and its reported reason.
+func failNicoCreate(bmi *v1alpha1.BareMetalInstance, artifacts map[string]any) error {
+	if err := recordNicoCreateFailure(bmi, artifacts); err != nil {
+		return err
+	}
+	message := "NICo create job failed; verify the Site before retrying"
+	if reason, _ := artifacts["nicoFailureReason"].(string); reason != "" {
+		message += ": " + reason
+	}
+	bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
+	bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
+		v1alpha1.HostConditionReasonTemplateFailed, message)
+	return nil
+}
+
 func isNicoBMaaS(bmi *v1alpha1.BareMetalInstance) bool {
 	return bmi.Spec.TemplateID == nicoBMaaSTemplateID
 }
@@ -139,11 +189,7 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaSProvisioning(
 	updated.Message = status.MessageWithDetails()
 	provisioning.UpdateJob(bmi.Status.ProvisioningJobs, updated)
 	if status.State == opv1alpha1.JobStateFailed || status.State == opv1alpha1.JobStateCanceled {
-		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
-		bmi.SetStatusCondition(v1alpha1.HostConditionProvisionTemplateComplete, metav1.ConditionFalse,
-			v1alpha1.HostConditionReasonTemplateFailed,
-			"NICo create job failed; verify the Site before retrying")
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, failNicoCreate(bmi, status.ExtraVars)
 	}
 	if status.State != opv1alpha1.JobStateSucceeded {
 		bmi.Status.Phase = v1alpha1.BareMetalInstancePhaseProgressing
@@ -196,6 +242,48 @@ func (r *BareMetalInstanceReconciler) reconcileNicoBMaaSProvisioning(
 	return ctrl.Result{}, nil
 }
 
+// resolveNicoIDsForDelete handles a delete that has no saved provider IDs yet.
+// An in-flight create may finish after Kubernetes accepts deletion, so it waits
+// for the create job's artifacts and never removes the finalizer on an
+// uncertain result. A create job that reports NotCreated releases the BMI.
+func (r *BareMetalInstanceReconciler) resolveNicoIDsForDelete(ctx context.Context, bmi *v1alpha1.BareMetalInstance) (ctrl.Result, error) {
+	latest := provisioning.FindLatestJobByType(bmi.Status.ProvisioningJobs, opv1alpha1.JobTypeProvision)
+	if latest == nil {
+		return ctrl.Result{}, fmt.Errorf("NICo create attempt has no saved job or provider IDs; inspect Site allocation")
+	}
+	outputs, ok := r.ProvisioningProvider.(provisioning.ProvisioningProviderWithProvisionOutputs)
+	if !ok {
+		return ctrl.Result{}, fmt.Errorf("NICo BMI deletion requires AAP provision artifacts")
+	}
+	status, err := outputs.GetProvisionStatusWithExtraVars(ctx, bmi, latest.JobID)
+	if err != nil {
+		return ctrl.Result{RequeueAfter: r.ProvisionPollIntervalDuration}, err
+	}
+	if !status.State.IsTerminal() {
+		return ctrl.Result{RequeueAfter: r.ProvisionPollIntervalDuration}, nil
+	}
+	if status.State == opv1alpha1.JobStateSucceeded {
+		instanceID, _ := status.ExtraVars["nicoInstanceID"].(string)
+		machineID, _ := status.ExtraVars["nicoMachineID"].(string)
+		if instanceID != "" && machineID != "" {
+			bmi.Status.NicoInstanceID, bmi.Status.NicoMachineID = instanceID, machineID
+		}
+	} else {
+		// The create job failed after deletion was requested.
+		if err := recordNicoCreateFailure(bmi, status.ExtraVars); err != nil {
+			return ctrl.Result{}, err
+		}
+		if bmi.Status.NicoCreateOutcome == nicoCreateOutcomeNotCreated {
+			controllerutil.RemoveFinalizer(bmi, BareMetalInstanceManagementFinalizer)
+			return ctrl.Result{}, r.Update(ctx, bmi)
+		}
+	}
+	if bmi.Status.NicoInstanceID == "" || bmi.Status.NicoMachineID == "" {
+		return ctrl.Result{}, fmt.Errorf("NICo create ended without both provider IDs; verify Site allocation before deletion")
+	}
+	return ctrl.Result{RequeueAfter: r.ProvisionPollIntervalDuration}, nil
+}
+
 // deleteNicoBMaaS leaves the BMI finalizer in place until the AAP backend has
 // observed Instance absence and the original Machine unassigned Ready.
 func (r *BareMetalInstanceReconciler) deleteNicoBMaaS(ctx context.Context, bmi *v1alpha1.BareMetalInstance) (ctrl.Result, error) {
@@ -206,9 +294,10 @@ func (r *BareMetalInstanceReconciler) deleteNicoBMaaS(ctx context.Context, bmi *
 		}
 		return ctrl.Result{}, nil
 	}
-	if !bmi.Status.NicoCreateAttempted && bmi.Status.NicoInstanceID == "" && bmi.Status.NicoMachineID == "" {
-		// A BMI can be deleted after the finalizer is installed but before
-		// any NICo create attempt. There is no provider resource to release.
+	if bmi.Status.NicoInstanceID == "" && bmi.Status.NicoMachineID == "" &&
+		(!bmi.Status.NicoCreateAttempted || bmi.Status.NicoCreateOutcome == nicoCreateOutcomeNotCreated) {
+		// The BMI was deleted before any NICo create attempt, or its create job
+		// failed before the create request. There is no provider resource to release.
 		controllerutil.RemoveFinalizer(bmi, BareMetalInstanceManagementFinalizer)
 		return ctrl.Result{}, r.Update(ctx, bmi)
 	}
@@ -216,30 +305,7 @@ func (r *BareMetalInstanceReconciler) deleteNicoBMaaS(ctx context.Context, bmi *
 		return ctrl.Result{}, fmt.Errorf("NICo BMI deletion requires a provisioning provider")
 	}
 	if bmi.Status.NicoInstanceID == "" || bmi.Status.NicoMachineID == "" {
-		// An in-flight create may finish after Kubernetes accepts deletion. Wait
-		// for its artifact IDs; never remove the finalizer on an uncertain result.
-		latest := provisioning.FindLatestJobByType(bmi.Status.ProvisioningJobs, opv1alpha1.JobTypeProvision)
-		if latest == nil {
-			return ctrl.Result{}, fmt.Errorf("NICo create attempt has no saved job or provider IDs; inspect Site allocation")
-		}
-		outputs, ok := r.ProvisioningProvider.(provisioning.ProvisioningProviderWithProvisionOutputs)
-		if !ok {
-			return ctrl.Result{}, fmt.Errorf("NICo BMI deletion requires AAP provision artifacts")
-		}
-		status, err := outputs.GetProvisionStatusWithExtraVars(ctx, bmi, latest.JobID)
-		if err != nil {
-			return ctrl.Result{RequeueAfter: r.ProvisionPollIntervalDuration}, err
-		}
-		if !status.State.IsTerminal() {
-			return ctrl.Result{RequeueAfter: r.ProvisionPollIntervalDuration}, nil
-		}
-		instanceID, instanceOK := status.ExtraVars["nicoInstanceID"].(string)
-		machineID, machineOK := status.ExtraVars["nicoMachineID"].(string)
-		if !instanceOK || !machineOK || instanceID == "" || machineID == "" {
-			return ctrl.Result{}, fmt.Errorf("NICo create ended without both provider IDs; verify Site allocation before deletion")
-		}
-		bmi.Status.NicoInstanceID, bmi.Status.NicoMachineID = instanceID, machineID
-		return ctrl.Result{RequeueAfter: r.ProvisionPollIntervalDuration}, nil
+		return r.resolveNicoIDsForDelete(ctx, bmi)
 	}
 	boundCtx, err := r.withNicoCredentials(ctx, bmi)
 	if err != nil {

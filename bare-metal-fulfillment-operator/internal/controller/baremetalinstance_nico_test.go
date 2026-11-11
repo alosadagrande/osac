@@ -27,6 +27,8 @@ type nicoPilotProvider struct {
 	lastExtraVars         map[string]any
 	outputs               map[string]any
 	expectedCredentialIDs []int
+	// provisionState is the create job state; empty means Succeeded.
+	provisionState opv1alpha1.JobState
 }
 
 func (p *nicoPilotProvider) TriggerProvisionWithExtraVars(ctx context.Context, _ client.Object, vars map[string]any) (*provisioning.ProvisionResult, error) {
@@ -38,8 +40,12 @@ func (p *nicoPilotProvider) TriggerProvisionWithExtraVars(ctx context.Context, _
 }
 
 func (p *nicoPilotProvider) GetProvisionStatusWithExtraVars(_ context.Context, _ client.Object, jobID string) (provisioning.ProvisionStatusWithExtraVars, error) {
+	state := p.provisionState
+	if state == "" {
+		state = opv1alpha1.JobStateSucceeded
+	}
 	return provisioning.ProvisionStatusWithExtraVars{
-		ProvisionStatus: provisioning.ProvisionStatus{JobID: jobID, State: opv1alpha1.JobStateSucceeded},
+		ProvisionStatus: provisioning.ProvisionStatus{JobID: jobID, State: state},
 		ExtraVars:       p.outputs,
 	}, nil
 }
@@ -322,6 +328,96 @@ var _ = Describe("NICo BareMetalInstance lifecycle", func() {
 			nicoTestBindingsV1Body(1)+"operatingSystems:\n  - diskImageID: centos-disk-image\n    nicoOperatingSystemID: nico-centos-os\n",
 			"catalog requires bindings version 2"),
 	)
+
+	Context("when the NICo create job fails", func() {
+		var deprovisionLaunches int
+
+		BeforeEach(func() {
+			deprovisionLaunches = 0
+			provider.provisionState = opv1alpha1.JobStateFailed
+			provider.triggerDeprovisionFunc = func(ctx context.Context, _ client.Object, _ []opv1alpha1.JobStatus) (*provisioning.DeprovisionResult, error) {
+				Expect(provisioning.AAPCredentialIDsFromContext(ctx)).To(Equal([]int{41}))
+				deprovisionLaunches++
+				return &provisioning.DeprovisionResult{Action: provisioning.DeprovisionTriggered, JobID: "nico-delete-1", BlockDeletionOnFailure: true}, nil
+			}
+		})
+
+		createAndFail := func() *v1alpha1.BareMetalInstance {
+			reconcile() // finalizer
+			reconcile() // create intent and AAP launch
+			fresh := reconcile()
+			Expect(fresh.Status.Phase).To(Equal(v1alpha1.BareMetalInstancePhaseFailed))
+			Expect(provider.launches).To(Equal(1))
+			return fresh
+		}
+
+		It("releases the BMI without NICo cleanup when nothing was created", func() {
+			provider.outputs = map[string]any{
+				"nicoCreateOutcome": "NotCreated",
+				"nicoFailureReason": "NICo Operating System nico-centos-os not found",
+			}
+			fresh := createAndFail()
+			Expect(fresh.Status.NicoCreateOutcome).To(Equal("NotCreated"))
+			condition := apimeta.FindStatusCondition(fresh.Status.Conditions, string(v1alpha1.HostConditionProvisionTemplateComplete))
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Message).To(ContainSubstring("NICo Operating System nico-centos-os not found"))
+
+			Expect(k8sClient.Delete(ctx, fresh)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &v1alpha1.BareMetalInstance{})).ToNot(Succeed())
+			Expect(deprovisionLaunches).To(BeZero())
+		})
+
+		It("saves the created Instance and releases it through NICo on delete", func() {
+			provider.outputs = map[string]any{
+				"nicoCreateOutcome": "Created",
+				"nicoInstanceID":    "nico-instance-1",
+				"nicoMachineID":     "nico-machine-1",
+				"nicoFailureReason": "Instance nico-instance-1 did not reach Ready before timeout",
+			}
+			fresh := createAndFail()
+			Expect(fresh.Status.NicoCreateOutcome).To(Equal("Created"))
+			Expect(fresh.Status.NicoInstanceID).To(Equal("nico-instance-1"))
+			Expect(fresh.Status.NicoMachineID).To(Equal("nico-machine-1"))
+
+			Expect(k8sClient.Delete(ctx, fresh)).To(Succeed())
+			reconcile() // launch deprovision with the saved IDs
+			Expect(deprovisionLaunches).To(Equal(1))
+			_, err := reconciler.Reconcile(ctx, req) // Released artifacts
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &v1alpha1.BareMetalInstance{})).ToNot(Succeed())
+		})
+
+		It("keeps the finalizer when the job reports no outcome", func() {
+			provider.provisionState = opv1alpha1.JobStateCanceled
+			provider.outputs = map[string]any{}
+			fresh := createAndFail()
+			Expect(fresh.Status.NicoCreateOutcome).To(Equal("Uncertain"))
+
+			Expect(k8sClient.Delete(ctx, fresh)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).To(MatchError(ContainSubstring("without both provider IDs")))
+			Expect(k8sClient.Get(ctx, req.NamespacedName, fresh)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(fresh, BareMetalInstanceManagementFinalizer)).To(BeTrue())
+			Expect(deprovisionLaunches).To(BeZero())
+		})
+
+		It("releases a BMI deleted while a create job that never reached NICo was running", func() {
+			provider.provisionState = opv1alpha1.JobStateRunning
+			reconcile()          // finalizer
+			fresh := reconcile() // create intent and AAP launch
+			Expect(provider.launches).To(Equal(1))
+
+			Expect(k8sClient.Delete(ctx, fresh)).To(Succeed())
+			provider.provisionState = opv1alpha1.JobStateFailed
+			provider.outputs = map[string]any{"nicoCreateOutcome": "NotCreated"}
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, req.NamespacedName, &v1alpha1.BareMetalInstance{})).ToNot(Succeed())
+			Expect(deprovisionLaunches).To(BeZero())
+		})
+	})
 
 	It("releases a BMI deleted before any NICo create attempt", func() {
 		fresh := reconcile() // install the cleanup finalizer

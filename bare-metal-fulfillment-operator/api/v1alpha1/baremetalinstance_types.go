@@ -295,6 +295,13 @@ type BareMetalInstanceStatus struct {
 	// It remains until delete confirms the Machine is unassigned Ready.
 	// +kubebuilder:validation:Optional
 	NicoMachineID string `json:"nicoMachineID,omitempty"`
+	// NicoCreateOutcome is the outcome reported by a failed NICo create job.
+	// NotCreated means the job failed before the create request, so delete has
+	// nothing to release in NICo. Uncertain requires Site verification. Created
+	// means the Instance exists and must be released through NICo.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=NotCreated;Uncertain;Created
+	NicoCreateOutcome string `json:"nicoCreateOutcome,omitempty"`
 	// ProvisioningJobs tracks the history of provision and deprovision operations
 	// Ordered chronologically, with latest operations at the end
 	// Limited to the last N jobs (configurable via OSAC_MAX_JOB_HISTORY, default 10)
