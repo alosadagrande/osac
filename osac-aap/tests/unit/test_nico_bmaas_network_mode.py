@@ -28,6 +28,8 @@ def params(mode="FLAT", **overrides):
         "subnet_id": "subnet-id" if mode == "ETHERNET_VIRTUALIZER" else "",
         "vpc_prefix_id": "prefix-id" if mode == "FNN" else "",
         "operating_system_id": "os-id",
+        "user_data": "",
+        "ssh_public_key": "",
         "phone_home_enabled": True,
         "instance_id": "",
         "machine_id": "",

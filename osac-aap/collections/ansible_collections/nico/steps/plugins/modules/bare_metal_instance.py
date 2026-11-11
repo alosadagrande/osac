@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+import yaml
 from ansible.module_utils.basic import AnsibleModule
 
 
@@ -99,6 +100,15 @@ options:
       - Approved NICo Operating System for the BMI DiskImage. Required for create.
       - Before a create, the module verifies it is a Ready templated iPXE definition synced to the
         VPC's Site that delivers the Instance user data through the tenant cloud-init datasource.
+  user_data:
+    type: str
+    description:
+      - Tenant user data. Must be a single-document C(#cloud-config) mapping, which NICo requires
+        when phone-home is enabled. Scripts, Jinja templates, archives and other formats are rejected.
+  ssh_public_key:
+    type: str
+    description:
+      - Tenant SSH public key. It is added to the cloud-config C(ssh_authorized_keys) of the default user.
   phone_home_enabled:
     type: bool
     default: true
@@ -357,6 +367,50 @@ def assigned_ip(instance, params):
     return matching[0]["ipAddresses"][0]
 
 
+CLOUD_CONFIG_HEADER = "#cloud-config"
+
+
+def compose_user_data(user_data, ssh_public_key):
+    """Build the NICo Instance user data from the tenant user data and SSH key.
+
+    Returns None when there is nothing to send; NICo then generates a minimal
+    cloud-config with only its phone-home block. NICo injects phone-home into
+    the returned document, so it must stay a single #cloud-config mapping.
+    """
+    if not user_data and not ssh_public_key:
+        return None
+    document = {}
+    if user_data:
+        first_line = user_data.lstrip().split("\n", 1)[0].strip()
+        if first_line != CLOUD_CONFIG_HEADER:
+            raise NicoError("tenant user data must start with #cloud-config; scripts, Jinja templates, "
+                            "archives and other cloud-init formats are not supported for NICo BMIs")
+        try:
+            documents = list(yaml.safe_load_all(user_data))
+        except yaml.YAMLError as exc:
+            raise NicoError("tenant user data is not valid cloud-config YAML") from exc
+        # A header-only document parses to no document at all.
+        documents = documents or [None]
+        if len(documents) != 1 or not isinstance(documents[0], (dict, type(None))):
+            raise NicoError("tenant user data must be a single cloud-config YAML mapping")
+        document = documents[0] or {}
+    if ssh_public_key:
+        keys = document.setdefault("ssh_authorized_keys", [])
+        if not isinstance(keys, list):
+            raise NicoError("tenant user data ssh_authorized_keys must be a list")
+        if ssh_public_key not in keys:
+            keys.append(ssh_public_key)
+        # Top-level keys apply to the default user. Tenant-defined users replace
+        # it unless the list keeps "default", so keep it for the OSAC key.
+        users = document.get("users")
+        if users is not None:
+            if not isinstance(users, list):
+                raise NicoError("tenant user data users must be a list")
+            if "default" not in users:
+                users.insert(0, "default")
+    return CLOUD_CONFIG_HEADER + "\n" + yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
+
+
 def ensure_present(client):
     params = client.params
     for key in ("name", "vpc_id"):
@@ -368,6 +422,8 @@ def ensure_present(client):
     validate_network_configuration(params)
     if not params["operating_system_id"]:
         raise NicoError("operating_system_id is required")
+    # Validate tenant input before any NICo call.
+    user_data = compose_user_data(params["user_data"], params["ssh_public_key"])
     vpc = get_or_none(client, "tenant", "vpc/" + quote(params["vpc_id"], safe=""))
     if vpc is None or vpc.get("tenantId") != params["tenant_id"]:
         raise NicoError("configured NICo VPC is absent or belongs to another tenant")
@@ -415,6 +471,8 @@ def ensure_present(client):
                 interface["subnetId" if params["subnet_id"] else "vpcPrefixId"] = params["subnet_id"] or params["vpc_prefix_id"]
                 body["interfaces"] = [interface]
             body["operatingSystemId"] = params["operating_system_id"]
+            if user_data is not None:
+                body["userData"] = user_data
             try:
                 _, instance = client.request("tenant", "POST", "instance", body)
             except NicoError as exc:
@@ -488,6 +546,7 @@ def main():
                                          choices=["ETHERNET_VIRTUALIZER", "FNN", "FLAT"]),
         flat_ipv4_cidr=dict(type="str", default=""),
         operating_system_id=dict(type="str", default=""),
+        user_data=dict(type="str", default="", no_log=True), ssh_public_key=dict(type="str", default=""),
         phone_home_enabled=dict(type="bool", default=True),
         timeout=dict(type="int", default=2700), poll_interval=dict(type="int", default=10),
     ), supports_check_mode=False)
