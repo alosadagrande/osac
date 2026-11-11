@@ -97,9 +97,15 @@ options:
     type: str
   ipxe_script:
     type: str
+  phone_home_enabled:
+    type: bool
+    default: true
+    description:
+      - When true, NICo reports the Instance Ready only after the booted OS phones home.
+      - When false, Ready proves allocation only, not an installed and booted OS.
   timeout:
     type: int
-    default: 1200
+    default: 2700
   poll_interval:
     type: int
     default: 10
@@ -354,7 +360,7 @@ def ensure_present(client):
             body = {"name": params["name"], "tenantId": params["tenant_id"],
                     "vpcId": params["vpc_id"],
                     "labels": {"osacBmiUid": params["bmi_uid"]},
-                    "phoneHomeEnabled": False}
+                    "phoneHomeEnabled": params["phone_home_enabled"]}
             body["machineId" if target_machine_id else "instanceTypeId"] = target_machine_id or params["instance_type_id"]
             if params["network_virtualization_type"] == "FLAT":
                 body["autoNetwork"] = True
@@ -439,7 +445,8 @@ def main():
                                          choices=["ETHERNET_VIRTUALIZER", "FNN", "FLAT"]),
         flat_ipv4_cidr=dict(type="str", default=""),
         operating_system_id=dict(type="str", default=""), ipxe_script=dict(type="str", default=""),
-        timeout=dict(type="int", default=1200), poll_interval=dict(type="int", default=10),
+        phone_home_enabled=dict(type="bool", default=True),
+        timeout=dict(type="int", default=2700), poll_interval=dict(type="int", default=10),
     ), supports_check_mode=False)
     try:
         if module.params["timeout"] <= 0 or module.params["poll_interval"] <= 0:

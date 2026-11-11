@@ -24,7 +24,7 @@
     bmi_uid: "{{ bare_metal_instance.metadata.uid }}"
     instance_id: "{{ bare_metal_instance.status.nicoInstanceID }}"
     machine_id: "{{ bare_metal_instance.status.nicoMachineID }}"
-    timeout: "{{ nico_bmaas_timeout }}"
+    timeout: "{{ nico_bmaas_delete_timeout }}"
     poll_interval: "{{ nico_bmaas_poll_interval }}"
   register: nico_bmaas_delete_result
   no_log: true

@@ -29,6 +29,7 @@ def params(mode="FLAT", **overrides):
         "vpc_prefix_id": "prefix-id" if mode == "FNN" else "",
         "operating_system_id": "",
         "ipxe_script": "#!ipxe\nexit",
+        "phone_home_enabled": True,
         "instance_id": "",
         "machine_id": "",
         "create_allowed": True,
@@ -228,6 +229,16 @@ def test_create_requires_one_placement_selector(instance_type_id, target_machine
         nico.ensure_present(client)
 
     assert client.posts == []
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_create_sends_the_configured_phone_home_setting(enabled):
+    client = FakeClient(params("FNN", phone_home_enabled=enabled),
+                        interfaces=[{"vpcPrefixId": "prefix-id", "ipAddresses": ["198.51.100.20"]}])
+
+    nico.ensure_present(client)
+
+    assert client.posts[0]["phoneHomeEnabled"] is enabled
 
 
 def test_targeted_create_rejects_a_different_machine_in_ready_response():
